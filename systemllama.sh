@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# ollama_shell_assistant.sh
-# Interactive shell assistant using Ollama Llama3.2 running on localhost
-# Requirements: bash, curl, jq, patch
+# ollama_shell_assistant_zenity.sh
+# Graphical shell assistant using Ollama with Zenity UI
+# Requirements: zenity, curl, jq, patch
 
 API_URL="http://localhost:11434/api/generate"
 MODEL="llama3.2"
+TMP_FILE=$(mktemp)
 
 # Detect OS
 if [[ -f /etc/os-release ]]; then
@@ -23,7 +24,7 @@ DESKTOP_ENVIRONMENT=${XDG_CURRENT_DESKTOP:-${DESKTOP_SESSION:-"Unknown"}}
 function ask_ai() {
   local prompt_text="$1"
   local system_info="OS: $OS_NAME $OS_VERSION. Desktop: $DESKTOP_ENVIRONMENT."
-  local instruction="Respond only with valid shell command(s). No explanations, no markdown, no formatting. Only the actual command line to execute. and never use snapd"
+  local instruction="Respond only with valid shell command(s). No explanations, no markdown, no formatting. Only the actual command line to execute."
   local full_prompt="$system_info\n$instruction\nUser: $prompt_text\nAI:"
   local payload
   payload=$(jq -n \
@@ -40,11 +41,10 @@ function ask_ai() {
 # Execute and check success
 function execute_with_check() {
   local command="$1"
-  echo "Running: $command"
-  echo ""
+  echo "Running: $command" > "$TMP_FILE"
   output=$(eval "$command" 2>&1)
   status=$?
-  echo "$output"
+  echo "$output" >> "$TMP_FILE"
   return $status
 }
 
@@ -59,15 +59,30 @@ function run_until_success() {
       if printf '%s\n' "${attempted[@]}" | grep -qx "$cmd"; then
         continue
       fi
+      
+      # Zenity confirmation dialog
+      zenity --question --title="Command Confirmation" --text="AI suggests command:\n\n<tt>$cmd</tt>\n\nExecute this command?" \
+        --width=500 --height=200 --ok-label="Execute" --cancel-label="Skip"
+      
+      if [[ $? -ne 0 ]]; then
+        zenity --info --title="Skipped" --text="Command skipped" --width=300 --height=100
+        continue
+      fi
+
       attempted+=("$cmd")
       execute_with_check "$cmd"
+      
       if [[ $? -eq 0 ]]; then
-        echo ""
-        echo "Task completed successfully."
+        zenity --text-info --title="Command Output" --filename="$TMP_FILE" --width=800 --height=600
+        zenity --info --title="Success" --text="Task completed successfully!" --width=300 --height=100
         return 0
       else
-        echo ""
-        echo "Error detected. Asking AI for a fix..."
+        zenity --text-info --title="Command Error" --filename="$TMP_FILE" --width=800 --height=600
+        zenity --question --title="Error Detected" --text="Command failed. Ask AI for a fix?" \
+          --width=400 --height=150 --ok-label="Retry" --cancel-label="Cancel"
+        if [[ $? -ne 0 ]]; then
+          return 1
+        fi
         ai_cmds=$(ask_ai "Command '$cmd' failed with: '$output'. Provide a new working shell command only to accomplish: $goal")
         break
       fi
@@ -75,23 +90,28 @@ function run_until_success() {
   done
 }
 
-# Main interactive loop
-echo "Welcome to Ollama Shell Assistant! Type 'exit' to quit."
+# Main Zenity interface
 while true; do
-  read -rp ">>> " user_input
-  [[ "$user_input" == "exit" ]] && break
+  user_input=$(zenity --entry --title="Ollama Assistant" --text="Enter your command request:" \
+    --width=500 --height=150 --ok-label="Submit" --cancel-label="Exit")
+  
+  [[ $? -ne 0 ]] && break
+  
   if [[ "$user_input" =~ ^edit[[:space:]]+(.+) ]]; then
     file_path=${BASH_REMATCH[1]}
     if [[ -f "$file_path" ]]; then
       file_content=$(sed 's/"/\\"/g' "$file_path")
       diff_patch=$(ask_ai "Edit file $file_path. Content:\n$file_content. Provide a unified diff only.")
       echo "$diff_patch" | patch -p0
-      echo "Applied patch to $file_path"
+      zenity --info --title="Patch Applied" --text="Applied patch to $file_path" --width=300 --height=100
     else
-      echo "File not found: $file_path"
+      zenity --error --title="File Error" --text="File not found: $file_path" --width=300 --height=100
     fi
     continue
   fi
+  
   run_until_success "$user_input"
 done
-echo "Goodbye!"
+
+rm "$TMP_FILE"
+zenity --info --title="Goodbye" --text="Thank you for using Ollama Assistant!" --width=300 --height=100
