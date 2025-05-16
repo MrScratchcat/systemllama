@@ -367,7 +367,7 @@ execute_with_check() {
     local display_command="$1"
     local exec_command="$2"
     local output_file=$(mktemp)
-    local timeout_seconds=15
+    local timeout_seconds=30
     local cmd_pid
     
     echo "Running: $display_command" > "$TMP_FILE"
