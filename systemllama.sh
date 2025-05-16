@@ -249,7 +249,7 @@ STRICT RULES:
     [[ "$model" == "DeepSeek AI" ]] && system_message+="\nDEEPSEEK FORMAT NOTE: Respond with command in \`\`\`bash blocks"
 
     # Start progress dialog
-    zenity --progress --title="Processing" --text="🔄 Generating command..." \
+    zenity --progress --title="Processing" --text="Generating command..." \
         --pulsate --no-cancel --width=300 2>/dev/null &
     ZENITY_PID=$!
     
