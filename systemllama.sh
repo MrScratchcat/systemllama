@@ -4,9 +4,13 @@
 # Requirements: zenity, curl, jq, coreutils
 
 BASE_URL="http://localhost:11434"
-DEEPSEEK_API_KEY=""
+DEEPSEEK_API_KEY="sk-fa87bb4f80bd423e843c4041093f5b9f"
 DEEPSEEK_URL="https://api.deepseek.com/v1/chat/completions"
 DEEPSEEK_MODEL="deepseek-chat"
+DEEPSEEK_REASONER_MODEL="deepseek-reasoner"  # Add the new DeepSeek Reasoner model
+REASON_API_KEY=""
+REASON_URL="https://api.reason.ai/v1/chat/completions"
+REASON_MODEL="reason-chat"
 TMP_FILE=$(mktemp)
 PASSWORD=""
 HISTORY_FILE="${HOME}/.ollama_shell_history.json"
@@ -93,6 +97,10 @@ detect_models() {
     fi
     if [ -n "$DEEPSEEK_API_KEY" ]; then
         echo "DeepSeek AI|DeepSeek|API Access|v1.0"
+        echo "DeepSeek Reasoner|DeepSeek|API Access|v1.0"  # Add the DeepSeek Reasoner model
+    fi
+    if [ -n "$REASON_API_KEY" ]; then
+        echo "Reason AI|Reason|API Access|v1.0"
     fi
 }
 
@@ -247,6 +255,7 @@ STRICT RULES:
 6. Validate syntax before responding"
     
     [[ "$model" == "DeepSeek AI" ]] && system_message+="\nDEEPSEEK FORMAT NOTE: Respond with command in \`\`\`bash blocks"
+    [[ "$model" == "Reason AI" ]] && system_message+="\nREASON FORMAT NOTE: Respond with command in \`\`\`bash blocks"
 
     # Start progress dialog
     zenity --progress --title="Processing" --text="Generating command..." \
@@ -254,11 +263,14 @@ STRICT RULES:
     ZENITY_PID=$!
     
     local raw=""
-    if [[ "$model" == "DeepSeek AI" ]]; then
-        # DeepSeek API call
+    if [[ "$model" == "DeepSeek AI" || "$model" == "DeepSeek Reasoner" ]]; then
+        # DeepSeek API call - use different model name based on selection
+        local deepseek_model_name="$DEEPSEEK_MODEL"
+        [[ "$model" == "DeepSeek Reasoner" ]] && deepseek_model_name="$DEEPSEEK_REASONER_MODEL"
+        
         local payload
         payload=$(jq -n \
-            --arg model "$DEEPSEEK_MODEL" \
+            --arg model "$deepseek_model_name" \
             --arg sys_msg "$system_message" \
             --argjson history "$history_messages" \
             '{
@@ -272,6 +284,26 @@ STRICT RULES:
         raw=$(curl -s -X POST "$DEEPSEEK_URL" \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
+            -d "$payload")
+        echo "$raw" > "$raw_response_file"
+    elif [[ "$model" == "Reason AI" ]]; then
+        # Reason AI API call
+        local payload
+        payload=$(jq -n \
+            --arg model "$REASON_MODEL" \
+            --arg sys_msg "$system_message" \
+            --argjson history "$history_messages" \
+            '{
+                model: $model,
+                messages: [
+                    {role: "system", content: $sys_msg},
+                    $history[]
+                ],
+                temperature: 0.1
+            }')
+        raw=$(curl -s -X POST "$REASON_URL" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $REASON_API_KEY" \
             -d "$payload")
         echo "$raw" > "$raw_response_file"
     else
@@ -302,7 +334,7 @@ STRICT RULES:
     echo "-----------------------" >&2
 
     # Extract command content
-    if [[ "$model" == "DeepSeek AI" ]]; then
+    if [[ "$model" == "DeepSeek AI" || "$model" == "DeepSeek Reasoner" || "$model" == "Reason AI" ]]; then
         local response_content=$(jq -r '.choices[0].message.content' "$raw_response_file")
     else
         local response_content=$(jq -r '.message.content' "$raw_response_file")
@@ -590,7 +622,7 @@ run_until_success() {
                     0)  # Try Again
                         continue
                         ;;
-                     5|255)  # Quit buttons - return to main prompt
+                    5|255)  # Quit buttons - return to main prompt
                         echo "QUIT detected in error dialog - returning to main prompt" >&2
                         return 1
                         ;;
@@ -621,11 +653,13 @@ else
     OS_VERSION=""
 fi
 
-# Detect desktop
+# Detect desktop environment
 DESKTOP_ENVIRONMENT=${XDG_CURRENT_DESKTOP:-${DESKTOP_SESSION:-"Unknown"}}
 
-# Main flow
+# Initialize history
 initialize_history
+
+# Model selection
 SELECTED_MODEL=$(select_model)
 [ -z "$SELECTED_MODEL" ] && exit 1
 
@@ -655,6 +689,7 @@ while true; do
         echo "User canceled main prompt, exiting" >&2
         quit_immediately  # Immediate exit
     fi
+    
     case "$user_input" in
         "switch model")
             NEW_MODEL=$(select_model)
