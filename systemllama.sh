@@ -4,7 +4,7 @@
 # Requirements: zenity, curl, jq, coreutils
 
 BASE_URL="http://localhost:11434"
-DEEPSEEK_API_KEY="sk-fa87bb4f80bd423e843c4041093f5b9f"
+DEEPSEEK_API_KEY=""
 DEEPSEEK_URL="https://api.deepseek.com/v1/chat/completions"
 DEEPSEEK_MODEL="deepseek-chat"
 DEEPSEEK_REASONER_MODEL="deepseek-reasoner"  # Add the new DeepSeek Reasoner model
