@@ -1,22 +1,72 @@
 #!/usr/bin/env bash
 # ollama_shell_assistant_zenity.sh
 # Graphical shell assistant with robust command extraction
-# Requirements: zenity, curl, jq, coreutils
+# Requirements: zenity, curl, jq, coreutils, ddgr
 
 BASE_URL="http://localhost:11434"
 DEEPSEEK_API_KEY=""
 DEEPSEEK_URL="https://api.deepseek.com/v1/chat/completions"
 DEEPSEEK_MODEL="deepseek-chat"
-DEEPSEEK_REASONER_MODEL="deepseek-reasoner"  # Add the new DeepSeek Reasoner model
-REASON_API_KEY=""
-REASON_URL="https://api.reason.ai/v1/chat/completions"
-REASON_MODEL="reason-chat"
 TMP_FILE=$(mktemp)
 PASSWORD=""
 HISTORY_FILE="${HOME}/.ollama_shell_history.json"
 OS_NAME=""
 OS_VERSION=""
 DESKTOP_ENVIRONMENT=""
+WEB_SEARCH_ENABLED=true
+
+# Check internet connectivity
+check_internet() {
+    if command -v curl >/dev/null 2>&1; then
+        curl -s --connect-timeout 5 --max-time 10 "https://duckduckgo.com" >/dev/null 2>&1
+        return $?
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q --spider --timeout=10 "https://duckduckgo.com" >/dev/null 2>&1
+        return $?
+    else
+        # Fallback to ping
+        ping -c 1 -W 5 8.8.8.8 >/dev/null 2>&1
+        return $?
+    fi
+}
+
+# Perform web search using ddgr
+perform_web_search() {
+    local query="$1"
+    local search_results=""
+    
+    # Check if ddgr is available
+    if ! command -v ddgr >/dev/null 2>&1; then
+        echo "Web search disabled: ddgr not found" >&2
+        return 1
+    fi
+    
+    # Check if python3 is available
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "Web search disabled: python3 not found" >&2
+        return 1
+    fi
+    
+    # Check internet connectivity
+    if ! check_internet; then
+        echo "Web search disabled: No internet connection" >&2
+        return 1
+    fi
+    
+    echo "🔍 Performing web search for: $query" >&2
+    
+    # Perform search with ddgr using python3 (no pager, first 5 results)
+    search_results=$(python3 $(which ddgr) --np -n 5 "$query" 2>/dev/null | head -20)
+    
+    if [[ -n "$search_results" ]]; then
+        echo "✓ Web search completed - found relevant results" >&2
+        echo "$search_results"
+        return 0
+    else
+        echo "⚠ No web search results found" >&2
+        return 1
+    fi
+}
 
 # Ensure clean exit
 cleanup_and_exit() {
@@ -127,8 +177,16 @@ extract_command() {
     # Debug raw response
     echo "DEBUG - Extracting command from: $response" >&2
     
-    # Pre-clean the response to handle escapes before parsing
+    # Pre-clean the response to handle escapes and thinking tags
     response=$(echo "$response" | sed 's/\\n/ /g' | sed 's/\\\\/ /g' | sed 's/\\"/"/g')
+    
+    # Remove thinking tags and their content (handle multiline with proper regex)
+    response=$(echo "$response" | sed ':a;s/<think>.*<\/think>//g;ta' | sed 's/<think>.*//g' | sed 's/<\/think>.*//g')
+    
+    # Also remove any remaining XML-like tags that might interfere
+    response=$(echo "$response" | sed 's/<[^>]*>//g')
+    
+    echo "DEBUG - After removing thinking tags: $response" >&2
     
     # Look for code blocks first - with enhanced debug output
     local command=$(echo "$response" | \
@@ -140,20 +198,22 @@ extract_command() {
         sed -n '/```$/,/```/{//!p;}' 2>/dev/null ||
         # Generic code blocks
         sed -n '/```/,/```/{//!p;}' 2>/dev/null ||
-        # Command-like lines (quotes handled)
-        grep -m1 -E '^[[:space:]]*(\x60|`)?[[:alnum:]]+(-[[:alnum:]]+)*(\s+[-[:alnum:]<>]+)*(\x60|`)?[[:space:]]*$' 2>/dev/null ||
+        # Command-like lines (quotes handled) - improved pattern
+        grep -m1 -E '^[[:space:]]*[[:alnum:]]+[[:space:]]+[[:alnum:]._-]+' 2>/dev/null ||
         # Simple check for common commands
-        grep -m1 -E '(apt|dnf|yum|pacman)[[:space:]]+(install|upgrade|remove|update)' 2>/dev/null
+        grep -m1 -E '(apt|dnf|yum|pacman|sudo)[[:space:]]+(install|upgrade|remove|update)' 2>/dev/null
     })
     
     echo "DEBUG - Extracted from code blocks: '$command'" >&2
     
-    # If no command found in code blocks, check if the entire response is a valid command
+    # If no command found in code blocks, try to extract from the cleaned response
     if [[ -z "$command" ]]; then
-        # Handle direct commands from model response (including those with && || | etc)
-        if [[ "$response" =~ ^[[:space:]]*[[:alnum:]]+[[:space:]].*$ ]]; then
-            # Check if it starts with a valid command format - now including angle brackets for placeholders
-            command=$(echo "$response" | grep -E '^[[:space:]]*[[:alnum:]./]+([ ][[:alnum:]./_=:&|;><^$()*{}\[\]"'\''#~+,?!-]+)*[[:space:]]*$')
+        # Look for lines that start with common command patterns
+        command=$(echo "$response" | grep -E '^[[:space:]]*(sudo[[:space:]]+)?(apt|dnf|yum|pacman|systemctl|service|mount|umount|cp|mv|rm|mkdir|chmod|chown|find|grep|sed|awk)[[:space:]]' | head -1)
+        
+        # If still nothing, try a broader pattern for any command-like structure
+        if [[ -z "$command" ]]; then
+            command=$(echo "$response" | grep -E '^[[:space:]]*[[:alnum:]./]+([[:space:]]+[-[:alnum:]._=:&|;><^$()*{}\[\]"'"'"'#~+,?!-]+)*[[:space:]]*$' | head -1)
         fi
         
         # Special case for direct API response format
@@ -162,6 +222,8 @@ extract_command() {
             local extracted=$(echo "$response" | jq -r '.message.content' 2>/dev/null)
             # Remove escape sequences and backticks from the extracted content
             extracted=$(echo "$extracted" | sed 's/\\n/ /g' | sed 's/\\\\/ /g' | sed 's/\\"/"/g' | tr -d '`')
+            # Remove thinking tags from extracted content
+            extracted=$(echo "$extracted" | sed ':a;s/<think>.*<\/think>//g;ta' | sed 's/<think>.*//g' | sed 's/<\/think>.*//g')
             echo "DEBUG - JSON extracted content: '$extracted'" >&2
             command="$extracted"
         fi
@@ -171,6 +233,15 @@ extract_command() {
     command=$(echo "$command" | \
     sed -E 's/(^[[:space:]]*[\x60`]?|[\x60`]?[[:space:]]*$)//g' | \
     sed 's/^[[:space:]]*//; s/[[:space:]]*$//; /^$/d')
+    
+    # If we still have a very long response, try to extract just the command part
+    if [[ ${#command} -gt 200 ]]; then
+        # Look for the actual command in the long response
+        local short_cmd=$(echo "$command" | grep -oE '(sudo[[:space:]]+)?(apt|dnf|yum|pacman|systemctl)[[:space:]]+[[:alnum:]._-]+([[:space:]]+[-[:alnum:]._]+)*' | head -1)
+        if [[ -n "$short_cmd" ]]; then
+            command="$short_cmd"
+        fi
+    fi
     
     echo "DEBUG - Cleaned command: '$command'" >&2
     
@@ -218,11 +289,24 @@ validate_sudo_password() {
     return $?
 }
 
-# Ask AI with robust parsing
+# Check internet connectivity and update web search status
+check_and_update_web_search() {
+    if [[ "$WEB_SEARCH_ENABLED" == true ]]; then
+        if ! check_internet; then
+            echo "⚠ No internet connection detected - automatically disabling web search" >&2
+            WEB_SEARCH_ENABLED=false
+            return 1
+        fi
+    fi
+    return 0
+}
+
+# Ask AI with robust parsing and web search integration
 ask_ai() {
     local prompt_text="$1"
     local model="$2"
     local raw_response_file=$(mktemp)
+    local search_context=""
     local ZENITY_PID=""
     
     # Define cleanup function to ensure Zenity is always killed
@@ -237,13 +321,76 @@ ask_ai() {
     # Set trap to ensure cleanup happens even on errors
     trap cleanup EXIT
     
+    # Check internet and update web search status before proceeding
+    check_and_update_web_search
+    
+    # Perform web search if enabled
+    if [[ "$WEB_SEARCH_ENABLED" == true ]]; then
+        # Create more specific search query with OS and technical context
+        local base_query=$(echo "$prompt_text" | sed -E 's/[^a-zA-Z0-9 ]//g' | tr -s ' ')
+        
+        # Enhance search query with OS and technical context
+        local enhanced_queries=()
+        
+        # Primary query with OS information
+        enhanced_queries+=("$OS_NAME $base_query linux command terminal")
+        
+        # Secondary query with package manager context
+        case "$OS_NAME" in
+            *"Ubuntu"*|*"Debian"*)
+                enhanced_queries+=("$base_query apt ubuntu debian linux")
+                ;;
+            *"Fedora"*|*"Red Hat"*|*"CentOS"*|*"Rocky"*)
+                enhanced_queries+=("$base_query dnf yum fedora redhat linux")
+                ;;
+            *"Arch"*|*"Manjaro"*)
+                enhanced_queries+=("$base_query pacman arch linux")
+                ;;
+            *"openSUSE"*|*"SUSE"*)
+                enhanced_queries+=("$base_query zypper opensuse suse linux")
+                ;;
+            *)
+                enhanced_queries+=("$base_query linux command bash terminal")
+                ;;
+        esac
+        
+        # Try multiple search queries and combine results
+        local combined_results=""
+        for query in "${enhanced_queries[@]}"; do
+            echo "🔍 Performing enhanced web search for: $query" >&2
+            
+            local search_results=$(python3 $(which ddgr) --np -n 3 "$query" 2>/dev/null | head -15)
+            
+            if [[ -n "$search_results" ]]; then
+                combined_results+="=== Search: $query ===\n$search_results\n\n"
+                echo "✓ Found results for: $query" >&2
+            else
+                echo "⚠ No results for: $query" >&2
+            fi
+            
+            # Small delay between searches to be respectful
+            sleep 0.5
+        done
+        
+        search_context="$combined_results"
+        
+        if [[ -n "$search_context" ]]; then
+            echo "🔍 Enhanced web search completed - multiple queries executed" >&2
+            echo "🔍 Web search results will enhance AI response" >&2
+        else
+            echo "⚠ Proceeding with AI response only (no web search results)" >&2
+        fi
+    else
+        echo "⚠ Web search disabled - proceeding with AI response only" >&2
+    fi
+    
     add_history "user" "$prompt_text"
     local history_messages=$(load_safe_history)
     
-    # Dynamic system message with emphasis on auto-confirmation
+    # Enhanced system message with web search context
     local system_message="You are a Linux terminal expert. Respond with ONE valid bash command between triple backticks.
 STRICT RULES:
-1. Command must work on $OS_NAME
+1. Command must work on $OS_NAME (version $OS_VERSION)
 2. Use only installed core utilities
 3. Put command in \`\`\`bash block
 4. ALWAYS include auto-confirmation flags where needed:
@@ -252,9 +399,16 @@ STRICT RULES:
    - Use --force or -f when overwriting files
    - Use yes | command or echo 'y' | command for other prompts
 5. NEVER suggest commands that will wait for user input
-6. Validate syntax before responding"
+6. Validate syntax before responding
+7. Consider the specific OS and its package manager"
+    
+    # Add web search context if available with clear indication
+    if [[ -n "$search_context" ]]; then
+        system_message+="\n\n🔍 ENHANCED WEB SEARCH CONTEXT (Multiple targeted searches for $OS_NAME):\n$search_context\n\nIMPORTANT: Use the above search results to provide the most accurate command for $OS_NAME $OS_VERSION. Pay special attention to OS-specific syntax and available packages."
+    fi
     
     [[ "$model" == "DeepSeek AI" ]] && system_message+="\nDEEPSEEK FORMAT NOTE: Respond with command in \`\`\`bash blocks"
+    [[ "$model" == "DeepSeek Reasoner" ]] && system_message+="\nDEEPSEEK REASONER FORMAT NOTE: Respond with command in \`\`\`bash blocks"
     [[ "$model" == "Reason AI" ]] && system_message+="\nREASON FORMAT NOTE: Respond with command in \`\`\`bash blocks"
 
     # Start progress dialog
@@ -334,42 +488,46 @@ STRICT RULES:
     echo "-----------------------" >&2
 
     # Extract command content
-    if [[ "$model" == "DeepSeek AI" || "$model" == "DeepSeek Reasoner" || "$model" == "Reason AI" ]]; then
+    if [[ "$model" == "DeepSeek AI" || "$model" == "DeepSeek Reasoner" ]]; then
         local response_content=$(jq -r '.choices[0].message.content' "$raw_response_file")
     else
         local response_content=$(jq -r '.message.content' "$raw_response_file")
     fi
     
-    # Pre-clean response content to handle escape sequences
+    # Pre-clean response content to handle escape sequences and thinking tags
     response_content=$(echo "$response_content" | sed 's/\\n/ /g' | sed 's/\\r/ /g' | sed 's/\\t/ /g')
+    # Remove thinking tags that cause markup parsing errors
+    response_content=$(echo "$response_content" | sed 's/<think>.*<\/think>//g' | sed 's/<think>.*//g')
     
     ai_cmd=$(extract_command "$response_content")
     
     # Validation
     if [[ -z "$ai_cmd" || "$ai_cmd" =~ ^[[:space:]]*$ ]]; then
         echo "ERROR: Command extraction failed! Raw response appears valid but couldn't extract command." >&2
+        
+        # Clean response content for display (escape HTML characters properly)
+        local display_content=$(echo "$response_content" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')
+        
         zenity --question \
             --title="Command Extraction Failed" \
-            --text="The AI provided a response, but command extraction failed.\n\nRaw response:\n<tt>$response_content</tt>\n\nWould you like to use this response anyway?" \
+            --text="The AI provided a response, but command extraction failed.\n\nRaw response:\n<tt>$display_content</tt>\n\nWould you like to use this response anyway?" \
             --ok-label="Use Anyway" --cancel-label="Retry" \
             --width=600
         if [[ $? -eq 0 ]]; then
-            # Use the raw response directly
-            ai_cmd=$(echo "$response_content" | tr -d '`')
-            echo "DEBUG - Using raw response: '$ai_cmd'" >&2
+            # Use the raw response directly, removing any remaining markup
+            ai_cmd=$(echo "$response_content" | tr -d '`' | sed 's/<[^>]*>//g' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+            echo "DEBUG - Using cleaned raw response: '$ai_cmd'" >&2
         else
             add_history "user" "Command extraction failed: $raw"
             return 1
         fi
     fi
     
-    # Final sanitization - ensure no trailing escape sequences or extra characters
+    # Clean the command without removing angle brackets for placeholders
     ai_cmd=$(echo "$ai_cmd" | \
-        sed 's/\\[nr]//g' | \
-        sed 's/\\//g' | \
-        sed 's/^sudo\s*/sudo /; s/\s\+/ /g' | \
-        sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
-
+        sed -E 's/(^[[:space:]]*[\x60`]?|[\x60`]?[[:space:]]*$)//g' | \
+        sed 's/^[[:space:]]*//; s/[[:space:]]*$//; /^$/d')
+    
     # Always explicitly kill the zenity process before validating
     cleanup
     trap - EXIT  # Remove the trap since we've manually cleaned up
@@ -502,6 +660,7 @@ run_until_success() {
     while true; do
         ai_cmd=$(ask_ai "$goal" "$model")
         [ $? -ne 0 ] && continue
+        
         display_cmd=$(sed 's/sudo /sudo -S /g' <<< "$ai_cmd")
         if [[ "$display_cmd" =~ ^sudo[[:space:]] ]]; then
             exec_cmd="echo '$PASSWORD' | $display_cmd"
@@ -622,16 +781,25 @@ run_until_success() {
                     0)  # Try Again
                         continue
                         ;;
-                    5|255)  # Quit buttons - return to main prompt
+                    1)  # Cancel/Close button (X button or Escape)
+                        echo "User cancelled command failed dialog - returning to main prompt" >&2
+                        return 1
+                        ;;
+                    5)  # Quit button (extra-button 1)
                         echo "QUIT detected in error dialog - returning to main prompt" >&2
                         return 1
                         ;;
-                    6)  # New Prompt - extra button 2
+                    6)  # New Prompt button (extra-button 2)
+                        echo "New Prompt requested - returning to main prompt" >&2
                         return 1
                         ;;
-                    *)  # Any other code
-                        echo "Unknown dialog return code: $exit_code, exiting" >&2
-                        cleanup_and_exit 1
+                    255) # Window closed
+                        echo "Dialog window closed - returning to main prompt" >&2
+                        return 1
+                        ;;
+                    *)  # Any other unknown code
+                        echo "Unknown dialog return code: $exit_code, treating as cancel" >&2
+                        return 1
                         ;;
                 esac
                 ;;
@@ -680,10 +848,25 @@ while true; do
 done
 
 while true; do
+    # Check internet connection and update web search status
+    check_and_update_web_search
+    
+    # Enhanced title to show web search status more prominently
+    title_text="AI Assistant (${SELECTED_MODEL})"
+    if [[ "$WEB_SEARCH_ENABLED" == true ]]; then
+        title_text+=" - 🔍 Web Search: ON"
+    else
+        if check_internet; then
+            title_text+=" - 🔍 Web Search: OFF"
+        else
+            title_text+=" - ⚠ Web Search: OFF (No Internet)"
+        fi
+    fi
+    
     user_input=$(zenity --entry \
-        --title="AI Assistant (${SELECTED_MODEL})" \
-        --text="Enter task description:" \
-        --width=500 --height=150)
+        --title="$title_text" \
+        --text="Enter task description:\n\nSpecial commands:\n• 'switch model' - Change AI model\n• 'clear history' - Clear chat history\n• 'toggle web search' - Enable/disable web search" \
+        --width=600 --height=200)
     user_response_code=$?
     if [[ $user_response_code -ne 0 ]]; then
         echo "User canceled main prompt, exiting" >&2
@@ -698,6 +881,20 @@ while true; do
             ;;
         "clear history")
             clear_history
+            continue
+            ;;
+        "toggle web search")
+            if [[ "$WEB_SEARCH_ENABLED" == true ]]; then
+                WEB_SEARCH_ENABLED=false
+                zenity --info --text="🔍 Web search DISABLED\nThe AI will work without internet search." --width=400
+            else
+                if check_internet; then
+                    WEB_SEARCH_ENABLED=true
+                    zenity --info --text="🔍 Web search ENABLED\nThe AI will search DuckDuckGo for relevant information." --width=400
+                else
+                    zenity --warning --text="⚠ Cannot enable web search\nNo internet connection detected.\n\nPlease check your connection and try again." --width=400
+                fi
+            fi
             continue
             ;;
         *)
