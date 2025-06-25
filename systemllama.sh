@@ -14,6 +14,7 @@ OS_NAME=""
 OS_VERSION=""
 DESKTOP_ENVIRONMENT=""
 WEB_SEARCH_ENABLED=true
+sites=10  # Number of sites to search max 11
 
 # Check internet connectivity
 check_internet() {
@@ -55,8 +56,8 @@ perform_web_search() {
     
     echo "🔍 Performing web search for: $query" >&2
     
-    # Perform search with ddgr using python3 (no pager, first 5 results)
-    search_results=$(python3 $(which ddgr) --np -n 5 "$query" 2>/dev/null | head -20)
+    # Perform search with ddgr using python3 - let it return all requested results
+    search_results=$(python3 $(which ddgr) --np -n $sites "$query" 2>/dev/null)
     
     if [[ -n "$search_results" ]]; then
         echo "✓ Web search completed - found relevant results" >&2
@@ -326,68 +327,46 @@ ask_ai() {
     
     # Perform web search if enabled
     if [[ "$WEB_SEARCH_ENABLED" == true ]]; then
-        # Create more specific search query with OS and technical context
-        local base_query=$(echo "$prompt_text" | sed -E 's/[^a-zA-Z0-9 ]//g' | tr -s ' ')
+        echo "🔍 Performing web search based on your request..." >&2
         
-        # Enhance search query with OS and technical context
-        local enhanced_queries=()
+        # Create search query from user input and OS context
+        local search_query="$OS_NAME $prompt_text terminal command"
         
-        # Primary query with OS information
-        enhanced_queries+=("$OS_NAME $base_query linux command terminal")
+        # Perform the search
+        local search_results=$(perform_web_search "$search_query")
         
-        # Secondary query with package manager context
-        case "$OS_NAME" in
-            *"Ubuntu"*|*"Debian"*)
-                enhanced_queries+=("$base_query apt ubuntu debian linux")
-                ;;
-            *"Fedora"*|*"Red Hat"*|*"CentOS"*|*"Rocky"*)
-                enhanced_queries+=("$base_query dnf yum fedora redhat linux")
-                ;;
-            *"Arch"*|*"Manjaro"*)
-                enhanced_queries+=("$base_query pacman arch linux")
-                ;;
-            *"openSUSE"*|*"SUSE"*)
-                enhanced_queries+=("$base_query zypper opensuse suse linux")
-                ;;
-            *)
-                enhanced_queries+=("$base_query linux command bash terminal")
-                ;;
-        esac
-        
-        # Try multiple search queries and combine results
-        local combined_results=""
-        for query in "${enhanced_queries[@]}"; do
-            echo "🔍 Performing enhanced web search for: $query" >&2
+        if [[ -n "$search_results" ]]; then
+            search_context="=== Web Search Results ===\n$search_results\n\n"
+            echo "✓ Web search completed - found relevant information" >&2
             
-            local search_results=$(python3 $(which ddgr) --np -n 3 "$query" 2>/dev/null | head -15)
-            
-            if [[ -n "$search_results" ]]; then
-                combined_results+="=== Search: $query ===\n$search_results\n\n"
-                echo "✓ Found results for: $query" >&2
-            else
-                echo "⚠ No results for: $query" >&2
-            fi
-            
-            # Small delay between searches to be respectful
-            sleep 0.5
-        done
-        
-        search_context="$combined_results"
-        
-        if [[ -n "$search_context" ]]; then
-            echo "🔍 Enhanced web search completed - multiple queries executed" >&2
-            echo "🔍 Web search results will enhance AI response" >&2
+            # Show colored search results to user
+            echo -e "\033[1;36m📋 Search results found:\033[0m" >&2
+            echo "$search_results" | while IFS= read -r line; do
+                if [[ "$line" =~ ^[0-9]+\. ]]; then
+                    # Title lines - bright yellow
+                    echo -e "\033[1;33m$line\033[0m" >&2
+                elif [[ "$line" =~ ^https?:// ]]; then
+                    # URL lines - bright blue
+                    echo -e "\033[1;34m$line\033[0m" >&2
+                elif [[ -n "$line" ]]; then
+                    # Description lines - light gray
+                    echo -e "\033[0;37m$line\033[0m" >&2
+                else
+                    echo "$line" >&2
+                fi
+            done
+            echo -e "\033[1;36m################\033[0m" >&2
         else
-            echo "⚠ Proceeding with AI response only (no web search results)" >&2
+            echo "⚠ Web search completed but no results found" >&2
         fi
     else
-        echo "⚠ Web search disabled - proceeding with AI response only" >&2
+        echo "ℹ️ Using AI knowledge for $OS_NAME commands (web search disabled)" >&2
     fi
     
     add_history "user" "$prompt_text"
     local history_messages=$(load_safe_history)
     
-    # Enhanced system message with web search context
+    # Enhanced system message focused on OS-specific knowledge
     local system_message="You are a Linux terminal expert. Respond with ONE valid bash command between triple backticks.
 STRICT RULES:
 1. Command must work on $OS_NAME (version $OS_VERSION)
@@ -400,11 +379,12 @@ STRICT RULES:
    - Use yes | command or echo 'y' | command for other prompts
 5. NEVER suggest commands that will wait for user input
 6. Validate syntax before responding
-7. Consider the specific OS and its package manager"
+7. Consider the specific OS and its package manager
+8. Use your knowledge of $OS_NAME best practices and current command syntax"
     
-    # Add web search context if available with clear indication
+    # Add web search context if available
     if [[ -n "$search_context" ]]; then
-        system_message+="\n\n🔍 ENHANCED WEB SEARCH CONTEXT (Multiple targeted searches for $OS_NAME):\n$search_context\n\nIMPORTANT: Use the above search results to provide the most accurate command for $OS_NAME $OS_VERSION. Pay special attention to OS-specific syntax and available packages."
+        system_message+="\n\n🔍 WEB SEARCH CONTEXT:\n$search_context\nIMPORTANT: Use the above search results along with your knowledge to provide the most accurate command for $OS_NAME $OS_VERSION."
     fi
     
     [[ "$model" == "DeepSeek AI" ]] && system_message+="\nDEEPSEEK FORMAT NOTE: Respond with command in \`\`\`bash blocks"
