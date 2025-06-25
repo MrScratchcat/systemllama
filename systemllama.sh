@@ -57,7 +57,7 @@ perform_web_search() {
     echo "🔍 Performing web search for: $query" >&2
     
     # Perform search with ddgr using python3 - let it return all requested results
-    search_results=$(python3 $(which ddgr) --np -n $sites "$query" 2>/dev/null)
+    search_results=$(python3 $(which ddgr) --np -x -n $sites "$query" 2>/dev/null)
     
     if [[ -n "$search_results" ]]; then
         echo "✓ Web search completed - found relevant results" >&2
