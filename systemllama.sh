@@ -3,6 +3,49 @@
 # Graphical shell assistant with robust command extraction
 # Requirements: zenity, curl, jq, coreutils, ddgr
 
+
+# Detect OS
+if [[ -f /etc/os-release ]]; then
+    . /etc/os-release
+    OS_NAME="$NAME"
+    OS_VERSION="$VERSION_ID"
+    DESKTOP_ENVIRONMENT=$(echo "$XDG_CURRENT_DESKTOP" | tr '[:upper:]' '[:lower:]')
+    # Try to detect package manager by checking what's available
+    if command -v rpm-ostree >/dev/null 2>&1; then
+        PACKAGE_MANAGER="rpm-ostree/flatpak"
+        OS_FAMILY="atomic desktops"
+    elif command -v dnf >/dev/null 2>&1; then
+        PACKAGE_MANAGER="dnf"
+        OS_FAMILY="fedora"
+    elif command -v apt >/dev/null 2>&1; then
+        PACKAGE_MANAGER="apt"
+        OS_FAMILY="debian"
+    elif command -v pacman >/dev/null 2>&1; then
+        PACKAGE_MANAGER="pacman"
+        OS_FAMILY="arch"
+    elif command -v zypper >/dev/null 2>&1; then    
+        PACKAGE_MANAGER="zypper"
+        OS_FAMILY="suse"
+    elif command -v yum >/dev/null 2>&1; then
+        PACKAGE_MANAGER="yum"
+        OS_FAMILY="redhat"
+    elif command -v apk >/dev/null 2>&1; then
+           PACKAGE_MANAGER="apk"
+        OS_FAMILY="alpine"
+    else
+        PACKAGE_MANAGER="unknown"
+        OS_FAMILY="unknown"
+    fi
+else
+    OS_NAME="Unknown"
+    OS_VERSION=""
+    PACKAGE_MANAGER="unknown"
+    OS_FAMILY="unknown"
+fi
+
+echo "Detected OS: $OS_NAME $OS_VERSION (Family: $OS_FAMILY, Package Manager: $PACKAGE_MANAGER)" >&2
+
+
 BASE_URL="http://localhost:11434"
 DEEPSEEK_API_KEY=""
 DEEPSEEK_URL="https://api.deepseek.com/v1/chat/completions"
@@ -76,6 +119,13 @@ cleanup_and_exit() {
     rm -f "$TMP_FILE" "$TMP_FILE.current" 2>/dev/null
     # Kill any running zenity processes started by this script
     pkill -P $$ zenity 2>/dev/null || true
+    
+    # Delete history file on exit for privacy
+    if [[ -f "$HISTORY_FILE" ]]; then
+        echo "Cleaning up chat history..." >&2
+        rm -f "$HISTORY_FILE" 2>/dev/null
+    fi
+    
     echo "Exiting with code $exit_code" >&2
     exit $exit_code
 }
@@ -92,8 +142,12 @@ quit_immediately() {
     else
         # Otherwise do a hard exit
         echo "TERMINATING IMMEDIATELY" >&2
-        # Clean up files before exiting
+        # Clean up files before exiting including history
         rm -f "$TMP_FILE" "$TMP_FILE.current" 2>/dev/null
+        if [[ -f "$HISTORY_FILE" ]]; then
+            echo "Cleaning up chat history..." >&2
+            rm -f "$HISTORY_FILE" 2>/dev/null
+        fi
         # Kill all zenity processes
         pkill -9 zenity 2>/dev/null
         # Hard exit
@@ -202,7 +256,7 @@ extract_command() {
         # Command-like lines (quotes handled) - improved pattern
         grep -m1 -E '^[[:space:]]*[[:alnum:]]+[[:space:]]+[[:alnum:]._-]+' 2>/dev/null ||
         # Simple check for common commands
-        grep -m1 -E '(apt|dnf|yum|pacman|sudo)[[:space:]]+(install|upgrade|remove|update)' 2>/dev/null
+        grep -m1 -E '(rpm-ostree|apt|dnf|yum|pacman|sudo)[[:space:]]+(install|upgrade|remove|update)' 2>/dev/null
     })
     
     echo "DEBUG - Extracted from code blocks: '$command'" >&2
@@ -302,6 +356,134 @@ check_and_update_web_search() {
     return 0
 }
 
+# Generate search term using AI
+generate_search_term() {
+    local prompt_text="$1"
+    local model="$2"
+    
+    echo "🤖 Generating search term..." >&2
+    echo "DEBUG: OS_NAME='$OS_NAME', OS_VERSION='$OS_VERSION', PACKAGE_MANAGER='$PACKAGE_MANAGER'" >&2
+    
+    # Create a search prompt with actual values substituted completely
+    local search_prompt="Based on this user request: '$prompt_text'
+Generate a detailed search query (5-12 words) for finding Linux terminal commands and solutions.
+
+USER'S SYSTEM: $OS_NAME version $OS_VERSION (Package Manager: $PACKAGE_MANAGER)
+
+CRITICAL REQUIREMENTS:
+- For software installation: MUST include the EXACT OS name '$OS_NAME'
+- Be VERY specific about the Linux distribution name
+- Include the actual OS name, not just version numbers
+- Do NOT use generic terms like 'fedora linux' when the OS name is '$OS_NAME'
+
+EXAMPLES for this specific system ($OS_NAME):
+- User: 'install firefox' → 'how to install firefox on $OS_NAME $OS_VERSION'
+- User: 'install minecraft' → 'how to install minecraft on $OS_NAME'
+- User: 'install docker' → 'how to install docker on $OS_NAME linux'
+- User: 'install steam' → 'how to install steam on $OS_NAME'
+
+REMEMBER: Always include '$OS_NAME' in the search query for software installation!
+
+Respond with ONLY the search query using the actual OS name '$OS_NAME', no explanations."
+
+    local search_term=""
+    if [[ "$model" == "DeepSeek AI" || "$model" == "DeepSeek Reasoner" ]]; then
+        # DeepSeek API call for search term
+        local deepseek_model_name="$DEEPSEEK_MODEL"
+        [[ "$model" == "DeepSeek Reasoner" ]] && deepseek_model_name="$DEEPSEEK_REASONER_MODEL"
+        
+        local payload
+        payload=$(jq -n \
+            --arg model "$deepseek_model_name" \
+            --arg prompt "$search_prompt" \
+            '{
+                model: $model,
+                messages: [
+                    {role: "user", content: $prompt}
+                ],
+                temperature: 0.1,
+                max_tokens: 100
+            }')
+        local response=$(curl -s -X POST "$DEEPSEEK_URL" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
+            -d "$payload")
+        search_term=$(echo "$response" | jq -r '.choices[0].message.content' | tr -d '"' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    elif [[ "$model" == "Reason AI" ]]; then
+        # Reason AI API call for search term
+        local payload
+        payload=$(jq -n \
+            --arg model "$REASON_MODEL" \
+            --arg prompt "$search_prompt" \
+            '{
+                model: $model,
+                messages: [
+                    {role: "user", content: $prompt}
+                ],
+                temperature: 0.1,
+                max_tokens: 60
+            }')
+        local response=$(curl -s -X POST "$REASON_URL" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $REASON_API_KEY" \
+            -d "$payload")
+        search_term=$(echo "$response" | jq -r '.choices[0].message.content' | tr -d '"' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    else
+        # Ollama API call for search term
+        local payload
+        payload=$(jq -n \
+            --arg model "$model" \
+            --arg prompt "$search_prompt" \
+            '{
+                model: $model,
+                messages: [
+                    {role: "user", content: $prompt}
+                ],
+                stream: false,
+                options: {temperature: 0.1}
+            }')
+        local response=$(curl -s -X POST "${BASE_URL}/api/chat" \
+            -H "Content-Type: application/json" \
+            -d "$payload")
+        search_term=$(echo "$response" | jq -r '.message.content' | tr -d '"' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    fi
+    
+    # Clean and validate search term
+    search_term=$(echo "$search_term" | sed 's/[^a-zA-Z0-9 _-]//g' | tr -s ' ')
+    
+    # Enhanced fallback with explicit OS name handling
+    if [[ -z "$search_term" || ${#search_term} -lt 3 ]]; then
+        echo "⚠ AI search term generation failed, using explicit OS name fallback" >&2
+        if [[ "$prompt_text" =~ install.*(firefox|chrome|steam|minecraft|discord|spotify|vlc|gimp|blender|vscode|code|atom|sublime) ]]; then
+            local app_name=$(echo "$prompt_text" | grep -oE "(firefox|chrome|steam|minecraft|discord|spotify|vlc|gimp|blender|vscode|code|atom|sublime)" | head -1)
+            # Always include the actual OS name
+            search_term="how to install $app_name on $OS_NAME $OS_VERSION"
+        elif [[ "$prompt_text" =~ install.* ]]; then
+            search_term="how to install software on $OS_NAME $OS_VERSION"
+        elif [[ "$prompt_text" =~ (service|driver|mount|package|systemd|firewall|network|audio|video|wifi|bluetooth) ]]; then
+            search_term="$prompt_text $OS_NAME $OS_VERSION terminal"
+        else
+            search_term="$prompt_text $OS_NAME terminal command"
+        fi
+    else
+        # Post-process the AI-generated search term to ensure it uses the correct OS name
+        # Replace common generic terms with the actual OS name
+        search_term=$(echo "$search_term" | sed "s/fedora linux/$OS_NAME/g")
+        search_term=$(echo "$search_term" | sed "s/fedora/$OS_NAME/g")
+        search_term=$(echo "$search_term" | sed "s/ubuntu/$OS_NAME/g")
+        search_term=$(echo "$search_term" | sed "s/debian/$OS_NAME/g")
+        search_term=$(echo "$search_term" | sed "s/arch linux/$OS_NAME/g")
+        
+        # Verify the search term includes the OS name, if not add it
+        if [[ "$search_term" =~ install ]] && [[ ! "$search_term" =~ $OS_NAME ]]; then
+            search_term=$(echo "$search_term" | sed "s/install \([a-zA-Z0-9]*\)/install \1 on $OS_NAME/")
+        fi
+        echo "✓ Generated search term: $search_term" >&2
+    fi
+    
+    echo "$search_term"
+}
+
 # Ask AI with robust parsing and web search integration
 ask_ai() {
     local prompt_text="$1"
@@ -327,20 +509,20 @@ ask_ai() {
     
     # Perform web search if enabled
     if [[ "$WEB_SEARCH_ENABLED" == true ]]; then
-        echo "🔍 Performing web search based on your request..." >&2
+        echo "🔍 AI will generate search term for your request..." >&2
         
-        # Create search query from user input and OS context
-        local search_query="$OS_NAME $prompt_text terminal command"
+        # Generate AI-powered search query
+        local search_query=$(generate_search_term "$prompt_text" "$model")
         
-        # Perform the search
+        # Perform the search with AI-generated query
         local search_results=$(perform_web_search "$search_query")
         
         if [[ -n "$search_results" ]]; then
-            search_context="=== Web Search Results ===\n$search_results\n\n"
+            search_context="=== Web Search Results for: $search_query ===\n$search_results\n\n"
             echo "✓ Web search completed - found relevant information" >&2
             
             # Show colored search results to user
-            echo -e "\033[1;36m📋 Search results found:\033[0m" >&2
+            echo -e "\033[1;36m📋 Search results for '$search_query':\033[0m" >&2
             echo "$search_results" | while IFS= read -r line; do
                 if [[ "$line" =~ ^[0-9]+\. ]]; then
                     # Title lines - bright yellow
@@ -357,7 +539,7 @@ ask_ai() {
             done
             echo -e "\033[1;36m################\033[0m" >&2
         else
-            echo "⚠ Web search completed but no results found" >&2
+            echo "⚠ Web search completed but no results found for: $search_query" >&2
         fi
     else
         echo "ℹ️ Using AI knowledge for $OS_NAME commands (web search disabled)" >&2
@@ -369,18 +551,26 @@ ask_ai() {
     # Enhanced system message focused on OS-specific knowledge
     local system_message="You are a Linux terminal expert. Respond with ONE valid bash command between triple backticks.
 STRICT RULES:
-1. Command must work on $OS_NAME (version $OS_VERSION)
+1. Command must work on $OS_NAME (version $OS_VERSION) which uses $PACKAGE_MANAGER package manager
 2. Use only installed core utilities
 3. Put command in \`\`\`bash block
-4. ALWAYS include auto-confirmation flags where needed:
+4. ALWAYS use the correct package manager for this system:
+   - For $OS_NAME: Use $PACKAGE_MANAGER (NOT apt, NOT dnf, NOT pacman unless it's the correct one)
    - Use -y with apt, dnf, yum
    - Use --noconfirm with pacman
    - Use --force or -f when overwriting files
    - Use yes | command or echo 'y' | command for other prompts
 5. NEVER suggest commands that will wait for user input
 6. Validate syntax before responding
-7. Consider the specific OS and its package manager
-8. Use your knowledge of $OS_NAME best practices and current command syntax"
+7. Consider the specific OS ($OS_NAME) and its package manager ($PACKAGE_MANAGER)
+8. Use your knowledge of $OS_NAME best practices and current command syntax
+9. CRITICAL: If this is Fedora/RedHat family, use 'dnf' not 'apt'
+10. CRITICAL: If this is Ubuntu/Debian family, use 'apt' not 'dnf'
+11. CRITICAL: If this is Arch family, use 'pacman' not 'apt' or 'dnf'
+12. CRITICAL: If this is fedora silverblue/bazzite/aurora/bluefin , use 'rpm-ostree/flatpak' not 'apt' or 'dnf'
+13. Never use sudo when installing a flatpak package,
+14. never forget to use -y/--noconfirm when installing packages
+15. For flatpak packages, use 'flatpak install --user' and -y at the end"
     
     # Add web search context if available
     if [[ -n "$search_context" ]]; then
@@ -821,16 +1011,6 @@ run_until_success() {
     echo "Returning to main prompt after quit" >&2
     return 1
 }
-
-# Detect OS
-if [[ -f /etc/os-release ]]; then
-    . /etc/os-release
-    OS_NAME="$NAME"
-    OS_VERSION="$VERSION_ID"
-else
-    OS_NAME="Unknown"
-    OS_VERSION=""
-fi
 
 # Detect desktop environment
 DESKTOP_ENVIRONMENT=${XDG_CURRENT_DESKTOP:-${DESKTOP_SESSION:-"Unknown"}}
