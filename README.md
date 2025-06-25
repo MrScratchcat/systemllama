@@ -5,5 +5,5 @@ curl -fsSL https://raw.githubusercontent.com/MrScratchcat/systemllama/refs/heads
 
 #you will need to install:
 ```bash
-zenity curl jq coreutils ddgr
+newt curl jq coreutils ddgr
 ```
