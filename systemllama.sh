@@ -512,15 +512,30 @@ STRICT RULES:
             --title="Command Extraction Failed" \
             --text="The AI provided a response, but command extraction failed.\n\nRaw response:\n<tt>$display_content</tt>\n\nWould you like to use this response anyway?" \
             --ok-label="Use Anyway" --cancel-label="Retry" \
+            --extra-button="Quit" \
             --width=600
-        if [[ $? -eq 0 ]]; then
-            # Use the raw response directly, removing any remaining markup
-            ai_cmd=$(echo "$response_content" | tr -d '`' | sed 's/<[^>]*>//g' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
-            echo "DEBUG - Using cleaned raw response: '$ai_cmd'" >&2
-        else
-            add_history "user" "Command extraction failed: $raw"
-            return 1
-        fi
+        
+        local extraction_result=$?
+        case $extraction_result in
+            0)  # Use Anyway
+                # Use the raw response directly, removing any remaining markup
+                ai_cmd=$(echo "$response_content" | tr -d '`' | sed 's/<[^>]*>//g' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+                echo "DEBUG - Using cleaned raw response: '$ai_cmd'" >&2
+                ;;
+            1)  # Retry
+                add_history "user" "Command extraction failed: $raw"
+                return 1
+                ;;
+            5)  # Quit - return to main prompt
+                echo "User chose to quit from command extraction dialog" >&2
+                add_history "user" "Command extraction failed - user returned to main prompt"
+                return 2  # Special return code to indicate quit
+                ;;
+            *)  # Any other code (window closed, etc.)
+                add_history "user" "Command extraction failed: $raw"
+                return 1
+                ;;
+        esac
     fi
     
     # Clean the command without removing angle brackets for placeholders
@@ -659,7 +674,23 @@ run_until_success() {
     local model="$2"
     while true; do
         ai_cmd=$(ask_ai "$goal" "$model")
-        [ $? -ne 0 ] && continue
+        local ai_result=$?
+        
+        # Handle different return codes from ask_ai
+        case $ai_result in
+            0)  # Success - continue with command execution
+                ;;
+            1)  # Retry - continue the loop
+                continue
+                ;;
+            2)  # User quit from command extraction - return to main prompt
+                echo "User quit from command extraction - returning to main prompt" >&2
+                return 1
+                ;;
+            *)  # Any other error - continue the loop
+                continue
+                ;;
+        esac
         
         display_cmd=$(sed 's/sudo /sudo -S /g' <<< "$ai_cmd")
         if [[ "$display_cmd" =~ ^sudo[[:space:]] ]]; then
