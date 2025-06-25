@@ -570,7 +570,7 @@ STRICT RULES:
 12. CRITICAL: If this is fedora silverblue/bazzite/aurora/bluefin , use 'rpm-ostree/flatpak' not 'apt' or 'dnf'
 13. Never use sudo when installing a flatpak package,
 14. never forget to use -y/--noconfirm when installing packages
-15. For flatpak packages, use 'flatpak install --user' and -y at the end"
+15. For flatpak packages, use 'flatpak install --user' but on atomic desktops use 'flatpak install --system' dont forget the -y at the end"
     
     # Add web search context if available
     if [[ -n "$search_context" ]]; then
