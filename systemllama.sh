@@ -3,6 +3,21 @@
 # Graphical shell assistant with robust command extraction
 # Requirements: zenity, curl, jq, coreutils, ddgr
 
+# Initialize variables first
+BASE_URL="http://localhost:11434"
+DEEPSEEK_API_KEY=""
+DEEPSEEK_URL="https://api.deepseek.com/v1/chat/completions"
+DEEPSEEK_MODEL="deepseek-chat"
+TMP_FILE=$(mktemp)
+PASSWORD=""
+HISTORY_FILE="${HOME}/.ollama_shell_history.json"
+OS_NAME=""
+OS_VERSION=""
+DESKTOP_ENVIRONMENT=""
+PACKAGE_MANAGER=""
+OS_FAMILY=""
+WEB_SEARCH_ENABLED=true
+sites=10  # Number of sites to search max 11
 
 # Detect OS
 if [[ -f /etc/os-release ]]; then
@@ -45,19 +60,6 @@ fi
 
 echo "Detected OS: $OS_NAME $OS_VERSION (Family: $OS_FAMILY, Package Manager: $PACKAGE_MANAGER)" >&2
 
-
-BASE_URL="http://localhost:11434"
-DEEPSEEK_API_KEY=""
-DEEPSEEK_URL="https://api.deepseek.com/v1/chat/completions"
-DEEPSEEK_MODEL="deepseek-chat"
-TMP_FILE=$(mktemp)
-PASSWORD=""
-HISTORY_FILE="${HOME}/.ollama_shell_history.json"
-OS_NAME=""
-OS_VERSION=""
-DESKTOP_ENVIRONMENT=""
-WEB_SEARCH_ENABLED=true
-sites=10  # Number of sites to search max 11
 
 # Check internet connectivity
 check_internet() {
