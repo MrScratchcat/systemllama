@@ -430,6 +430,21 @@ Respond with ONLY the search query using the actual OS name '$OS_NAME', no expla
             -H "Authorization: Bearer $REASON_API_KEY" \
             -d "$payload")
         search_term=$(echo "$response" | jq -r '.choices[0].message.content' | tr -d '"' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        # Enhanced cleaning for Reason AI - remove thinking content more aggressively
+        search_term=$(echo "$search_term" | sed '/think/,$d' | tail -n 1)
+        echo "DEBUG - Reason AI search term after cleaning: '$search_term'" >&2
+        
+        # If we still have thinking content or the result is just "think", try alternative extraction
+        if [[ "$search_term" == "think" || "$search_term" =~ think ]]; then
+            echo "DEBUG - Detected 'think' content, attempting alternative extraction" >&2
+            # Try to find lines that look like search queries
+            search_term=$(echo "$response" | jq -r '.choices[0].message.content' | grep -E "how to|install.*on.*Bazzite|Bazzite.*install" | head -1)
+            if [[ -z "$search_term" ]]; then
+                # Last resort: look for the last meaningful line that's not thinking content
+                search_term=$(echo "$response" | jq -r '.choices[0].message.content' | grep -v "think\|Let me\|Looking at\|The user" | grep -E "[a-zA-Z]+" | tail -1)
+            fi
+            echo "DEBUG - Alternative extraction result: '$search_term'" >&2
+        fi
     else
         # Ollama API call for search term
         local payload
@@ -450,7 +465,12 @@ Respond with ONLY the search query using the actual OS name '$OS_NAME', no expla
         search_term=$(echo "$response" | jq -r '.message.content' | tr -d '"' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
     fi
     
-    # Clean and validate search term
+    # Clean and validate search term - enhanced for Reason AI
+    # Remove any remaining thinking content that might have been missed
+    search_term=$(echo "$search_term" | sed 's/think.*//g' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    # Extract only the last line if multiple lines (for Reason AI responses)
+    search_term=$(echo "$search_term" | tail -n 1)
+    # Clean special characters but preserve spaces and common punctuation
     search_term=$(echo "$search_term" | sed 's/[^a-zA-Z0-9 _-]//g' | tr -s ' ')
     
     # Enhanced fallback with explicit OS name handling
@@ -572,7 +592,8 @@ STRICT RULES:
 12. CRITICAL: If this is fedora silverblue/bazzite/aurora/bluefin , use 'rpm-ostree/flatpak' not 'apt' or 'dnf'
 13. Never use sudo when installing a flatpak package,
 14. never forget to use -y/--noconfirm when installing packages
-15. For flatpak packages, use 'flatpak install --user' but on atomic desktops use 'flatpak install --system' dont forget the -y at the end"
+15. For flatpak packages, use 'flatpak install --user' but on atomic desktops use like bazzite 'flatpak install --system' dont forget the -y at the end
+16. You dont always need to use flatpak on atomic desktops, you can use rpm-ostree to install packages"
     
     # Add web search context if available
     if [[ -n "$search_context" ]]; then
@@ -662,6 +683,14 @@ STRICT RULES:
     # Extract command content
     if [[ "$model" == "DeepSeek AI" || "$model" == "DeepSeek Reasoner" ]]; then
         local response_content=$(jq -r '.choices[0].message.content' "$raw_response_file")
+    elif [[ "$model" == "Reason AI" ]]; then
+        local response_content=$(jq -r '.choices[0].message.content' "$raw_response_file")
+        # Special handling for Reason AI - remove thinking content more aggressively
+        response_content=$(echo "$response_content" | sed '/think/,$d')
+        # If that removed everything, try a different approach
+        if [[ -z "$response_content" || "$response_content" =~ ^[[:space:]]*$ ]]; then
+            response_content=$(jq -r '.choices[0].message.content' "$raw_response_file" | grep -v "think" | tail -n 5)
+        fi
     else
         local response_content=$(jq -r '.message.content' "$raw_response_file")
     fi
